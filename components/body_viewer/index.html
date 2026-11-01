@@ -1,0 +1,1162 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PainSense AI - 3D Body Viewer</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 12px;
+            font-family: Arial, sans-serif;
+            background: #f5f7fb;
+            color: #263248;
+        }
+
+        .viewer-container {
+            width: 100%;
+            background: white;
+            border: 1px solid #e3e8f0;
+            border-radius: 16px;
+            padding: 12px;
+        }
+
+        .toolbar {
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        button {
+            border: 1px solid #d7deea;
+            background: #ffffff;
+            color: #263248;
+            border-radius: 8px;
+            padding: 9px 15px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #eef3ff;
+            border-color: #8da8e8;
+        }
+
+        button.active {
+            background: #315bd6;
+            color: white;
+            border-color: #315bd6;
+        }
+
+        button.clear {
+            color: #c0392b;
+        }
+
+        #viewer {
+            position: relative;
+            width: 100%;
+            height: 490px;
+            overflow: hidden;
+            border-radius: 12px;
+            background:
+                radial-gradient(circle at 50% 35%, #ffffff, #edf2fa);
+            cursor: grab;
+        }
+
+        #viewer:active {
+            cursor: grabbing;
+        }
+
+        #viewer canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        #tooltip {
+            position: absolute;
+            display: none;
+            z-index: 10;
+            pointer-events: none;
+            background: #18243b;
+            color: white;
+            padding: 7px 11px;
+            border-radius: 7px;
+            font-size: 12px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .selection-panel {
+            padding: 13px 5px 5px;
+        }
+
+        .selection-title {
+            font-size: 14px;
+            font-weight: 700;
+            margin-bottom: 9px;
+        }
+
+        #selectedRegions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 7px;
+            min-height: 28px;
+        }
+
+        .region-chip {
+            padding: 6px 10px;
+            background: #fff0df;
+            color: #a95012;
+            border: 1px solid #ffd4ad;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .empty-message {
+            font-size: 12px;
+            color: #8993a5;
+        }
+
+        .instructions {
+            text-align: center;
+            color: #778196;
+            font-size: 12px;
+            padding: 8px 0 3px;
+        }
+
+        @media (max-width: 600px) {
+            #viewer {
+                height: 420px;
+            }
+
+            button {
+                padding: 8px 10px;
+                font-size: 12px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="viewer-container">
+
+    <div class="toolbar">
+        <button id="frontButton" class="active">
+            Front View
+        </button>
+
+        <button id="backButton">
+            Back View
+        </button>
+
+        <button id="resetButton">
+            Reset View
+        </button>
+
+        <button id="clearButton" class="clear">
+            Clear Selection
+        </button>
+    </div>
+
+    <div id="viewer">
+        <div id="tooltip"></div>
+    </div>
+
+    <div class="selection-panel">
+        <div class="selection-title">
+            Selected Body Regions
+        </div>
+
+        <div id="selectedRegions">
+            <span class="empty-message">
+                No regions selected yet.
+            </span>
+        </div>
+    </div>
+
+    <div class="instructions">
+        Hover over a body region to identify it.
+        Click to select or deselect.
+        Drag to rotate the model and scroll to zoom.
+    </div>
+
+</div>
+
+
+<script type="module">
+
+import * as THREE from
+    "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+// ==========================================
+// STREAMLIT COMMUNICATION BRIDGE
+// ==========================================
+
+function sendToStreamlit(type, extra = {}) {
+
+    window.parent.postMessage(
+        {
+            isStreamlitMessage: true,
+            type: type,
+            ...extra
+        },
+        "*"
+    );
+}
+
+const Streamlit = {
+
+    setComponentReady: function () {
+
+        sendToStreamlit(
+            "streamlit:componentReady",
+            {
+                apiVersion: 1
+            }
+        );
+
+    },
+
+    setComponentValue: function (value) {
+
+        sendToStreamlit(
+            "streamlit:setComponentValue",
+            {
+                value: value,
+                dataType: "json"
+            }
+        );
+
+    },
+
+    setFrameHeight: function (height) {
+
+        sendToStreamlit(
+            "streamlit:setFrameHeight",
+            {
+                height: height
+            }
+        );
+
+    }
+};
+
+
+
+// ==========================================
+// 1. HTML ELEMENTS
+// ==========================================
+
+const viewer = document.getElementById("viewer");
+const tooltip = document.getElementById("tooltip");
+const selectedContainer = document.getElementById("selectedRegions");
+
+const frontButton = document.getElementById("frontButton");
+const backButton = document.getElementById("backButton");
+const resetButton = document.getElementById("resetButton");
+const clearButton = document.getElementById("clearButton");
+
+
+// ==========================================
+// 2. THREE.JS SCENE
+// ==========================================
+
+const scene = new THREE.Scene();
+
+scene.background = new THREE.Color("#edf2fa");
+
+const camera = new THREE.PerspectiveCamera(
+    38,
+    viewer.clientWidth / viewer.clientHeight,
+    0.1,
+    100
+);
+
+camera.position.set(0, 0.25, 7.2);
+camera.lookAt(0, 0.35, 0);
+
+const renderer = new THREE.WebGLRenderer({
+    antialias: true,
+    alpha: false
+});
+
+renderer.setPixelRatio(
+    Math.min(window.devicePixelRatio, 2)
+);
+
+renderer.setSize(
+    viewer.clientWidth,
+    viewer.clientHeight
+);
+
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+viewer.appendChild(renderer.domElement);
+
+
+// ==========================================
+// 3. LIGHTING
+// ==========================================
+
+scene.add(
+    new THREE.AmbientLight(0xffffff, 1.5)
+);
+
+const mainLight = new THREE.DirectionalLight(
+    0xffffff,
+    2.0
+);
+
+mainLight.position.set(4, 6, 7);
+scene.add(mainLight);
+
+const backLight = new THREE.DirectionalLight(
+    0xc7d9ff,
+    1.0
+);
+
+backLight.position.set(-4, 3, -5);
+scene.add(backLight);
+
+
+// ==========================================
+// 4. HUMAN MODEL
+// ==========================================
+
+const human = new THREE.Group();
+scene.add(human);
+
+const skinMaterial = new THREE.MeshStandardMaterial({
+    color: 0xe9b995,
+    roughness: 0.75
+});
+
+const clothingMaterial = new THREE.MeshStandardMaterial({
+    color: 0x5684c9,
+    roughness: 0.8
+});
+
+const pantsMaterial = new THREE.MeshStandardMaterial({
+    color: 0x40547a,
+    roughness: 0.85
+});
+
+const shoeMaterial = new THREE.MeshStandardMaterial({
+    color: 0x34445d,
+    roughness: 0.8
+});
+
+const selectedMaterial = new THREE.MeshStandardMaterial({
+    color: 0xff9f43,
+    emissive: 0x8c3d00,
+    emissiveIntensity: 0.25,
+    roughness: 0.55
+});
+
+const hoveredMaterial = new THREE.MeshStandardMaterial({
+    color: 0x69c7ff,
+    emissive: 0x174c77,
+    emissiveIntensity: 0.2,
+    roughness: 0.6
+});
+
+const selectableParts = [];
+const partObjects = {};
+
+const selectedRegions = new Set();
+
+let currentView = "Front";
+
+
+// ==========================================
+// 5. BODY PART CREATION
+// ==========================================
+
+function createEllipsoid(
+    name,
+    position,
+    scale,
+    material,
+    selectable = false
+) {
+
+    const geometry = new THREE.SphereGeometry(
+        1,
+        32,
+        24
+    );
+
+    const mesh = new THREE.Mesh(
+        geometry,
+        material
+    );
+
+    mesh.position.set(
+        position[0],
+        position[1],
+        position[2]
+    );
+
+    mesh.scale.set(
+        scale[0],
+        scale[1],
+        scale[2]
+    );
+
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+
+    human.add(mesh);
+
+    if (selectable) {
+
+        mesh.userData.partName = name;
+
+        mesh.userData.originalMaterial = material;
+
+        mesh.material = material.clone();
+
+        selectableParts.push(mesh);
+
+        partObjects[name] = mesh;
+    }
+
+    return mesh;
+}
+
+
+function createCylinderBetween(
+    start,
+    end,
+    radius,
+    material
+) {
+
+    const startVector = new THREE.Vector3(
+        start[0], start[1], start[2]
+    );
+
+    const endVector = new THREE.Vector3(
+        end[0], end[1], end[2]
+    );
+
+    const direction = new THREE.Vector3()
+        .subVectors(endVector, startVector);
+
+    const geometry = new THREE.CylinderGeometry(
+        radius,
+        radius,
+        direction.length(),
+        24
+    );
+
+    const mesh = new THREE.Mesh(
+        geometry,
+        material
+    );
+
+    mesh.position.copy(
+        startVector.clone().add(endVector).multiplyScalar(0.5)
+    );
+
+    mesh.quaternion.setFromUnitVectors(
+        new THREE.Vector3(0, 1, 0),
+        direction.normalize()
+    );
+
+    human.add(mesh);
+
+    return mesh;
+}
+
+
+// ==========================================
+// 6. HEAD AND NECK
+// ==========================================
+
+createEllipsoid(
+    "head",
+    [0, 2.45, 0],
+    [0.34, 0.43, 0.31],
+    skinMaterial,
+    true
+);
+
+createEllipsoid(
+    "neck",
+    [0, 1.92, 0],
+    [0.15, 0.19, 0.16],
+    skinMaterial,
+    true
+);
+
+
+// ==========================================
+// 7. TORSO
+// ==========================================
+
+// Clothing base
+
+createEllipsoid(
+    "torso_base",
+    [0, 1.20, 0],
+    [0.57, 0.79, 0.32],
+    clothingMaterial
+);
+
+// Front body regions
+
+createEllipsoid(
+    "chest",
+    [0, 1.54, 0.345],
+    [0.39, 0.25, 0.065],
+    skinMaterial,
+    true
+);
+
+createEllipsoid(
+    "abdomen",
+    [0, 1.03, 0.345],
+    [0.32, 0.27, 0.065],
+    skinMaterial,
+    true
+);
+
+createEllipsoid(
+    "pelvis",
+    [0, 0.57, 0.30],
+    [0.38, 0.20, 0.065],
+    pantsMaterial,
+    true
+);
+
+// Back body regions
+
+createEllipsoid(
+    "upper_back",
+    [0, 1.52, -0.345],
+    [0.39, 0.25, 0.065],
+    skinMaterial,
+    true
+);
+
+createEllipsoid(
+    "lower_back",
+    [0, 1.02, -0.345],
+    [0.32, 0.27, 0.065],
+    skinMaterial,
+    true
+);
+
+
+// ==========================================
+// 8. ARMS
+// ==========================================
+
+function createArm(side, direction) {
+
+    const upperArmName = side + "_upper_arm";
+    const forearmName = side + "_forearm";
+    const handName = side + "_hand";
+
+    const shoulderX = direction * 0.56;
+    const elbowX = direction * 0.78;
+    const wristX = direction * 0.91;
+    const handX = direction * 0.94;
+
+    const shoulder = [shoulderX, 1.67, 0];
+    const elbow = [elbowX, 1.12, 0];
+    const wrist = [wristX, 0.64, 0];
+    const hand = [handX, 0.43, 0];
+
+    createCylinderBetween(
+        shoulder,
+        elbow,
+        0.135,
+        skinMaterial
+    );
+
+    createEllipsoid(
+        upperArmName,
+        [direction * 0.68, 1.40, 0.03],
+        [0.14, 0.30, 0.145],
+        skinMaterial,
+        true
+    );
+
+    createCylinderBetween(
+        elbow,
+        wrist,
+        0.105,
+        skinMaterial
+    );
+
+    createEllipsoid(
+        forearmName,
+        [direction * 0.85, 0.87, 0.03],
+        [0.115, 0.29, 0.12],
+        skinMaterial,
+        true
+    );
+
+    createEllipsoid(
+        handName,
+        hand,
+        [0.105, 0.16, 0.085],
+        skinMaterial,
+        true
+    );
+}
+
+createArm("left", -1);
+createArm("right", 1);
+
+
+// ==========================================
+// 9. LEGS
+// ==========================================
+
+function createLeg(side, direction) {
+
+    const thighName = side + "_thigh";
+    const kneeName = side + "_knee";
+    const lowerLegName = side + "_lower_leg";
+    const footName = side + "_foot";
+
+    const hip = [direction * 0.22, 0.46, 0];
+    const knee = [direction * 0.24, -0.52, 0];
+    const ankle = [direction * 0.24, -1.50, 0];
+
+    createCylinderBetween(
+        hip,
+        knee,
+        0.18,
+        pantsMaterial
+    );
+
+    createEllipsoid(
+        thighName,
+        [direction * 0.23, -0.03, 0],
+        [0.19, 0.49, 0.19],
+        pantsMaterial,
+        true
+    );
+
+    createEllipsoid(
+        kneeName,
+        knee,
+        [0.16, 0.17, 0.17],
+        skinMaterial,
+        true
+    );
+
+    createCylinderBetween(
+        knee,
+        ankle,
+        0.115,
+        skinMaterial
+    );
+
+    createEllipsoid(
+        lowerLegName,
+        [direction * 0.24, -1.01, 0],
+        [0.13, 0.43, 0.14],
+        skinMaterial,
+        true
+    );
+
+    createEllipsoid(
+        footName,
+        [direction * 0.24, -1.67, 0.12],
+        [0.16, 0.12, 0.29],
+        shoeMaterial,
+        true
+    );
+}
+
+createLeg("left", -1);
+createLeg("right", 1);
+
+
+// ==========================================
+// 10. RAYCASTING
+// ==========================================
+
+const raycaster = new THREE.Raycaster();
+
+const mouse = new THREE.Vector2();
+
+let hoveredPart = null;
+
+function getHoveredPart(event) {
+
+    const rect = renderer.domElement.getBoundingClientRect();
+
+    mouse.x =
+        ((event.clientX - rect.left) / rect.width) * 2 - 1;
+
+    mouse.y =
+        -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+    raycaster.setFromCamera(mouse, camera);
+
+    const intersections = raycaster.intersectObjects(
+        selectableParts,
+        false
+    );
+
+    return intersections.length > 0
+        ? intersections[0].object
+        : null;
+}
+
+
+// ==========================================
+// 11. MATERIAL AND SELECTION MANAGEMENT
+// ==========================================
+
+function updatePartAppearance(part) {
+
+    if (!part) return;
+
+    const name = part.userData.partName;
+
+    if (selectedRegions.has(name)) {
+
+        part.material = selectedMaterial.clone();
+
+    } else if (part === hoveredPart) {
+
+        part.material = hoveredMaterial.clone();
+
+    } else {
+
+        part.material =
+            part.userData.originalMaterial.clone();
+    }
+}
+
+
+function updateAllAppearances() {
+
+    selectableParts.forEach(part => {
+        updatePartAppearance(part);
+    });
+}
+
+
+function updateSelectedDisplay() {
+
+    selectedContainer.innerHTML = "";
+
+    if (selectedRegions.size === 0) {
+
+        const message = document.createElement("span");
+
+        message.className = "empty-message";
+
+        message.textContent = "No regions selected yet.";
+
+        selectedContainer.appendChild(message);
+
+        return;
+    }
+
+    selectedRegions.forEach(name => {
+
+        const chip = document.createElement("span");
+
+        chip.className = "region-chip";
+
+        chip.textContent = name
+            .replaceAll("_", " ")
+            .replace(/\b\w/g, letter => letter.toUpperCase());
+
+        selectedContainer.appendChild(chip);
+    });
+}
+
+
+// ==========================================
+// 12. SEND DATA TO STREAMLIT
+// ==========================================
+
+function publishSelection() {
+
+    Streamlit.setComponentValue({
+
+        selected_regions: Array.from(selectedRegions),
+
+        body_view: currentView,
+
+        event_id: Date.now()
+    });
+}
+
+
+// ==========================================
+// 13. MOUSE INTERACTIONS
+// ==========================================
+
+let isDragging = false;
+let pointerMoved = false;
+
+let previousX = 0;
+let previousY = 0;
+
+renderer.domElement.addEventListener(
+    "pointerdown",
+    event => {
+
+        isDragging = true;
+        pointerMoved = false;
+
+        previousX = event.clientX;
+        previousY = event.clientY;
+    }
+);
+
+
+renderer.domElement.addEventListener(
+    "pointermove",
+    event => {
+
+        if (isDragging) {
+
+            const deltaX = event.clientX - previousX;
+            const deltaY = event.clientY - previousY;
+
+            if (
+                Math.abs(deltaX) > 2 ||
+                Math.abs(deltaY) > 2
+            ) {
+                pointerMoved = true;
+            }
+
+            human.rotation.y += deltaX * 0.008;
+
+            human.rotation.x += deltaY * 0.004;
+
+            human.rotation.x = THREE.MathUtils.clamp(
+                human.rotation.x,
+                -0.5,
+                0.5
+            );
+
+            previousX = event.clientX;
+            previousY = event.clientY;
+
+            return;
+        }
+
+        const part = getHoveredPart(event);
+
+        if (part !== hoveredPart) {
+
+            hoveredPart = part;
+
+            updateAllAppearances();
+        }
+
+        if (part) {
+
+            const name = part.userData.partName
+                .replaceAll("_", " ")
+                .replace(/\b\w/g, letter => letter.toUpperCase());
+
+            tooltip.textContent = name;
+
+            tooltip.style.display = "block";
+
+            const rect = viewer.getBoundingClientRect();
+
+            tooltip.style.left =
+                (event.clientX - rect.left + 12) + "px";
+
+            tooltip.style.top =
+                (event.clientY - rect.top + 12) + "px";
+
+        } else {
+
+            tooltip.style.display = "none";
+        }
+    }
+);
+
+
+renderer.domElement.addEventListener(
+    "pointerup",
+    () => {
+
+        isDragging = false;
+    }
+);
+
+
+renderer.domElement.addEventListener(
+    "pointerleave",
+    () => {
+
+        isDragging = false;
+
+        hoveredPart = null;
+
+        tooltip.style.display = "none";
+
+        updateAllAppearances();
+    }
+);
+
+
+renderer.domElement.addEventListener(
+    "click",
+    event => {
+
+        if (pointerMoved) {
+
+            pointerMoved = false;
+
+            return;
+        }
+
+        const part = getHoveredPart(event);
+
+        if (!part) return;
+
+        const name = part.userData.partName;
+
+        if (selectedRegions.has(name)) {
+
+            selectedRegions.delete(name);
+
+        } else {
+
+            selectedRegions.add(name);
+        }
+
+        updateAllAppearances();
+
+        updateSelectedDisplay();
+
+        publishSelection();
+    }
+);
+
+
+// ==========================================
+// 14. ZOOM
+// ==========================================
+
+renderer.domElement.addEventListener(
+    "wheel",
+    event => {
+
+        event.preventDefault();
+
+        const direction = event.deltaY > 0 ? 0.35 : -0.35;
+
+        const distance = Math.abs(camera.position.z);
+
+        const newDistance = THREE.MathUtils.clamp(
+            distance + direction,
+            4.5,
+            10
+        );
+
+        camera.position.z =
+            currentView === "Front"
+                ? newDistance
+                : -newDistance;
+
+        camera.lookAt(0, 0.35, 0);
+
+    },
+    { passive: false }
+);
+
+
+// ==========================================
+// 15. FRONT AND BACK VIEWS
+// ==========================================
+
+function setView(view) {
+
+    currentView = view;
+
+    human.rotation.set(0, 0, 0);
+
+    const distance = Math.max(
+        4.5,
+        Math.abs(camera.position.z)
+    );
+
+    if (view === "Front") {
+
+        camera.position.set(
+            0,
+            0.25,
+            distance
+        );
+
+        frontButton.classList.add("active");
+
+        backButton.classList.remove("active");
+
+    } else {
+
+        camera.position.set(
+            0,
+            0.25,
+            -distance
+        );
+
+        frontButton.classList.remove("active");
+
+        backButton.classList.add("active");
+    }
+
+    camera.lookAt(0, 0.35, 0);
+
+    publishSelection();
+}
+
+
+frontButton.addEventListener(
+    "click",
+    () => setView("Front")
+);
+
+backButton.addEventListener(
+    "click",
+    () => setView("Back")
+);
+
+
+// ==========================================
+// 16. RESET VIEW
+// ==========================================
+
+resetButton.addEventListener(
+    "click",
+    () => {
+
+        setView("Front");
+
+        camera.position.set(0, 0.25, 7.2);
+
+        camera.lookAt(0, 0.35, 0);
+
+        human.rotation.set(0, 0, 0);
+    }
+);
+
+
+// ==========================================
+// 17. CLEAR SELECTION
+// ==========================================
+
+clearButton.addEventListener(
+    "click",
+    () => {
+
+        selectedRegions.clear();
+
+        updateAllAppearances();
+
+        updateSelectedDisplay();
+
+        publishSelection();
+    }
+);
+
+
+// ==========================================
+// 18. RESIZE VIEWER
+// ==========================================
+
+function resizeViewer() {
+
+    const width = viewer.clientWidth;
+
+    const height = viewer.clientHeight;
+
+    if (width <= 0 || height <= 0) return;
+
+    camera.aspect = width / height;
+
+    camera.updateProjectionMatrix();
+
+    renderer.setSize(width, height);
+
+    renderer.setPixelRatio(
+        Math.min(window.devicePixelRatio, 2)
+    );
+}
+
+
+const resizeObserver = new ResizeObserver(
+    resizeViewer
+);
+
+resizeObserver.observe(viewer);
+
+
+// ==========================================
+// 19. ANIMATION LOOP
+// ==========================================
+
+function animate() {
+
+    requestAnimationFrame(animate);
+
+    renderer.render(scene, camera);
+}
+
+animate();
+
+
+// ==========================================
+// 20. STREAMLIT INITIALIZATION
+// ==========================================
+
+// ==========================================
+// STREAMLIT COMPONENT INITIALIZATION
+// ==========================================
+
+Streamlit.setComponentReady();
+
+Streamlit.setFrameHeight(720);
+
+// Listen for Streamlit render messages
+
+window.addEventListener("message", function(event) {
+
+    if (
+        event.data &&
+        event.data.type === "streamlit:render"
+    ) {
+
+        resizeViewer();
+
+        Streamlit.setFrameHeight(720);
+
+    }
+
+});
+
+</script>
+
+</body>
+</html>
